@@ -227,6 +227,14 @@ def lock(vault_path: Path | None) -> None:
 
 
 @main.command()
+def tui() -> None:
+    """Launch the terminal UI."""
+    from . import tui as tui_module
+
+    tui_module.run()
+
+
+@main.command()
 @click.option("--length", type=int, default=generator.DEFAULT_LENGTH, show_default=True)
 @click.option("--symbols/--no-symbols", default=True, help="Include symbol characters.")
 @click.option(

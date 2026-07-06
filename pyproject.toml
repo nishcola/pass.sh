@@ -13,13 +13,17 @@ dependencies = [
     "cryptography>=44.0",
     "pyperclip>=1.8",
     "click>=8.1",
+    "textual>=0.58",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 pm = "passsh.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
