@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from . import agent, clipboard, generator, ratelimit, storage
+from . import agent, clipboard, generator, session, storage
 
 _vault_option = click.option(
     "--vault",
@@ -21,31 +21,15 @@ def _resolve_path(vault_path: Path | None) -> Path:
 
 
 def _open_vault(path: Path) -> tuple[bytes, dict, dict]:
-    cached = agent.get_cached_key(path)
+    cached = session.try_cached_session(path)
     if cached is not None:
-        key, kdf_params = cached
-        try:
-            entries = storage.read_entries(path, key)
-        except storage.VaultError:
-            pass  # stale session (e.g. vault replaced); fall through to a full reprompt
-        else:
-            return key, kdf_params, entries
-
-    try:
-        ratelimit.check(path)
-    except ratelimit.RateLimitedError as exc:
-        raise click.ClickException(str(exc))
+        return cached
 
     password = getpass("Master password: ")
     try:
-        key, kdf_params, entries = storage.load_vault(path, password.encode("utf-8"))
-    except storage.VaultError as exc:
-        ratelimit.record_failure(path)
+        return session.unlock(path, password.encode("utf-8"))
+    except session.UnlockError as exc:
         raise click.ClickException(str(exc))
-
-    ratelimit.record_success(path)
-    agent.start_session(path, key, kdf_params)
-    return key, kdf_params, entries
 
 
 def _prompt_new_password(label: str) -> str:
@@ -227,11 +211,12 @@ def lock(vault_path: Path | None) -> None:
 
 
 @main.command()
-def tui() -> None:
+@_vault_option
+def tui(vault_path: Path | None) -> None:
     """Launch the terminal UI."""
     from . import tui as tui_module
 
-    tui_module.run()
+    tui_module.run(_resolve_path(vault_path))
 
 
 @main.command()

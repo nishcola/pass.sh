@@ -86,7 +86,7 @@ def create_vault(path: Path, password: bytes) -> None:
 
 def _read_document(path: Path) -> dict:
     if not vault_exists(path):
-        raise VaultError(f"No vault found at {path}. Run 'pass-sh init' first.")
+        raise VaultError(f"No vault found at {path}. Run 'pm init' first.")
     try:
         return json.loads(path.read_text())
     except json.JSONDecodeError as exc:
