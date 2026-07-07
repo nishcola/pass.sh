@@ -1,11 +1,16 @@
 """CLI entry point for pass.sh."""
 
+from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
 
 import click
 
 from . import agent, clipboard, generator, session, storage
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 _vault_option = click.option(
     "--vault",
@@ -72,7 +77,7 @@ def init(vault_path: Path | None, force: bool) -> None:
 @click.option("--notes", default="", help="Optional freeform notes.")
 @click.option("--force", is_flag=True, help="Overwrite an existing entry.")
 def add(vault_path: Path | None, name: str, username: str, notes: str, force: bool) -> None:
-    """Add a new entry to the vault."""
+    """Add a new entry to the vault. NAME identifies the entry (e.g. a service or site name)."""
     path = _resolve_path(vault_path)
     key, kdf_params, entries = _open_vault(path)
 
@@ -80,7 +85,12 @@ def add(vault_path: Path | None, name: str, username: str, notes: str, force: bo
         raise click.ClickException(f"Entry '{name}' already exists. Use --force to overwrite.")
 
     entry_password = _prompt_new_password(f"Password for '{name}'")
-    entries[name] = {"username": username, "password": entry_password, "notes": notes}
+    entries[name] = {
+        "username": username,
+        "password": entry_password,
+        "notes": notes,
+        "updated_at": _now_iso(),
+    }
     storage.save_vault(path, key, kdf_params, entries)
     click.echo(f"Added '{name}'.")
 
@@ -101,7 +111,7 @@ def add(vault_path: Path | None, name: str, username: str, notes: str, force: bo
     help="Seconds before the clipboard is auto-cleared (only applies with --copy).",
 )
 def get(vault_path: Path | None, name: str, copy: bool, clear_delay: float) -> None:
-    """Show a stored entry. The password is copied to the clipboard by default."""
+    """Show entry NAME. The password is copied to the clipboard by default."""
     path = _resolve_path(vault_path)
     _key, _kdf_params, entries = _open_vault(path)
 
@@ -158,7 +168,7 @@ def update(
     notes: str | None,
     change_password: bool,
 ) -> None:
-    """Update fields on an existing entry."""
+    """Update fields on entry NAME. At least one of --username/--notes/--password is required."""
     path = _resolve_path(vault_path)
     key, kdf_params, entries = _open_vault(path)
 
@@ -166,15 +176,16 @@ def update(
     if entry is None:
         raise click.ClickException(f"No entry named '{name}'.")
 
+    if username is None and notes is None and not change_password:
+        raise click.ClickException("Nothing to update: pass --username, --notes, or --password.")
+
     if username is not None:
         entry["username"] = username
     if notes is not None:
         entry["notes"] = notes
     if change_password:
         entry["password"] = _prompt_new_password(f"New password for '{name}'")
-
-    if username is None and notes is None and not change_password:
-        raise click.ClickException("Nothing to update: pass --username, --notes, or --password.")
+    entry["updated_at"] = _now_iso()
 
     storage.save_vault(path, key, kdf_params, entries)
     click.echo(f"Updated '{name}'.")
@@ -185,7 +196,7 @@ def update(
 @click.argument("name")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def delete(vault_path: Path | None, name: str, yes: bool) -> None:
-    """Delete an entry from the vault."""
+    """Delete entry NAME from the vault."""
     path = _resolve_path(vault_path)
     key, kdf_params, entries = _open_vault(path)
 
@@ -220,7 +231,13 @@ def tui(vault_path: Path | None) -> None:
 
 
 @main.command()
-@click.option("--length", type=int, default=generator.DEFAULT_LENGTH, show_default=True)
+@click.option(
+    "--length",
+    type=int,
+    default=generator.DEFAULT_LENGTH,
+    show_default=True,
+    help="Number of characters in the generated password.",
+)
 @click.option("--symbols/--no-symbols", default=True, help="Include symbol characters.")
 @click.option(
     "--exclude-ambiguous",
@@ -230,7 +247,7 @@ def tui(vault_path: Path | None) -> None:
 @click.option(
     "--copy/--no-copy",
     default=True,
-    help="Copy the generated password to the clipboard instead of printing it.",
+    help="Copy the generated password to the clipboard instead of printing it (default: copy).",
 )
 @click.option(
     "--clear-delay",

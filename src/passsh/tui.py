@@ -11,13 +11,42 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 from . import session, storage
 
+_UPDATED_AT_PLACEHOLDER = "—"  # em dash, shown when an entry predates the field
+
+
+def _format_updated_at(entry: dict) -> str:
+    value = entry.get("updated_at")
+    if not value:
+        return _UPDATED_AT_PLACEHOLDER
+    return value.replace("T", " ").replace("+00:00", " UTC")
+
+
+class VimDataTable(DataTable):
+    """DataTable with vim-style j/k navigation added alongside the arrow-key
+    defaults (BINDINGS merge across the class hierarchy, so this only adds
+    to, not replaces, DataTable's own bindings)."""
+
+    BINDINGS = [("j", "cursor_down", "Down"), ("k", "cursor_up", "Up")]
+
+
+def _matches(query: str, name: str, entry: dict) -> bool:
+    query = query.strip().lower()
+    if not query:
+        return True
+    return query in name.lower() or query in entry.get("username", "").lower()
+
 
 class MainScreen(Screen):
-    """The app's home screen. The vault entry list will live here."""
+    """The app's home screen: a live-searchable, scrollable table of vault
+    entries.
+
+    Only service name, username, and last-updated time are shown here --
+    never passwords.
+    """
 
     # "app.quit" (not "quit") because Textual dispatches an action to the
     # exact node where the binding is declared -- MainScreen itself has no
@@ -25,19 +54,53 @@ class MainScreen(Screen):
     # to route there instead of silently failing to dispatch.
     BINDINGS = [("q", "app.quit", "Quit")]
 
+    # How long to wait after the last keystroke before actually re-filtering
+    # and repopulating the table -- avoids redoing that work on every single
+    # keystroke while the user is still typing, which would lag on a vault
+    # with many entries.
+    SEARCH_DEBOUNCE = 0.2
+
     def __init__(self, vault_path: Path, key: bytes, kdf_params: dict, entries: dict) -> None:
         super().__init__()
         self.vault_path = vault_path
         self.key = key
         self.kdf_params = kdf_params
         self.entries = entries
+        self._search_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
-        count = len(self.entries)
-        noun = "entry" if count == 1 else "entries"
-        yield Static(f"Unlocked. {count} {noun} in the vault.", id="body")
+        yield Input(placeholder="Search by service or username...", id="search")
+        yield VimDataTable(id="entries", cursor_type="row")
         yield Footer()
+
+    def on_mount(self) -> None:
+        table = self.query_one("#entries", VimDataTable)
+        table.add_columns("Service", "Username", "Last updated")
+        self._populate(self.entries)
+        self.query_one("#search", Input).focus()
+
+    def _populate(self, entries: dict) -> None:
+        table = self.query_one("#entries", VimDataTable)
+        table.clear()
+        for name in sorted(entries):
+            entry = entries[name]
+            table.add_row(name, entry.get("username", ""), _format_updated_at(entry), key=name)
+
+    @on(Input.Changed, "#search")
+    def handle_search_changed(self, event: Input.Changed) -> None:
+        if self._search_timer is not None:
+            self._search_timer.stop()
+        query = event.value
+        self._search_timer = self.set_timer(
+            self.SEARCH_DEBOUNCE, lambda: self._apply_filter(query)
+        )
+
+    def _apply_filter(self, query: str) -> None:
+        filtered = {
+            name: entry for name, entry in self.entries.items() if _matches(query, name, entry)
+        }
+        self._populate(filtered)
 
 
 class UnlockScreen(Screen):
