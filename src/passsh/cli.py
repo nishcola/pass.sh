@@ -1,16 +1,11 @@
 """CLI entry point for pass.sh."""
 
-from datetime import datetime, timezone
 from getpass import getpass
 from pathlib import Path
 
 import click
 
-from . import agent, clipboard, generator, session, storage
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+from . import agent, clipboard, entry_ops, generator, session, storage
 
 _vault_option = click.option(
     "--vault",
@@ -85,12 +80,7 @@ def add(vault_path: Path | None, name: str, username: str, notes: str, force: bo
         raise click.ClickException(f"Entry '{name}' already exists. Use --force to overwrite.")
 
     entry_password = _prompt_new_password(f"Password for '{name}'")
-    entries[name] = {
-        "username": username,
-        "password": entry_password,
-        "notes": notes,
-        "updated_at": _now_iso(),
-    }
+    entries[name] = entry_ops.build_entry(username, entry_password, notes)
     storage.save_vault(path, key, kdf_params, entries)
     click.echo(f"Added '{name}'.")
 
@@ -179,13 +169,8 @@ def update(
     if username is None and notes is None and not change_password:
         raise click.ClickException("Nothing to update: pass --username, --notes, or --password.")
 
-    if username is not None:
-        entry["username"] = username
-    if notes is not None:
-        entry["notes"] = notes
-    if change_password:
-        entry["password"] = _prompt_new_password(f"New password for '{name}'")
-    entry["updated_at"] = _now_iso()
+    new_password = _prompt_new_password(f"New password for '{name}'") if change_password else None
+    entry_ops.apply_update(entry, username=username, notes=notes, password=new_password)
 
     storage.save_vault(path, key, kdf_params, entries)
     click.echo(f"Updated '{name}'.")
