@@ -5,15 +5,17 @@ crypto/storage/clipboard/session modules for anything that touches the
 vault -- none of that logic is reimplemented here.
 """
 
+import time
 from pathlib import Path
+from typing import Callable
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
-from . import clipboard, entry_ops, session, storage
+from . import agent, clipboard, entry_ops, generator, session, storage
 
 _UPDATED_AT_PLACEHOLDER = "—"  # em dash, shown when an entry predates the field
 
@@ -60,32 +62,6 @@ class EntryFormScreen(ModalScreen[bool]):
 
     BINDINGS = [("escape", "dismiss_form", "Cancel")]
 
-    DEFAULT_CSS = """
-    EntryFormScreen {
-        align: center middle;
-    }
-    #entry-form {
-        width: 60;
-        height: auto;
-        border: thick $primary;
-        padding: 1 2;
-        background: $surface;
-    }
-    #password-row {
-        height: 3;
-    }
-    #password-row Input {
-        width: 1fr;
-    }
-    #form-buttons {
-        height: 3;
-        align: right middle;
-    }
-    #form-error {
-        color: $error;
-    }
-    """
-
     def __init__(
         self,
         vault_path: Path,
@@ -111,7 +87,7 @@ class EntryFormScreen(ModalScreen[bool]):
         title = f"Edit '{self.entry_name}'" if self.is_edit else "Add entry"
         password_placeholder = "(leave blank to keep current)" if self.is_edit else "Password"
 
-        with Vertical(id="entry-form"):
+        with VerticalScroll(id="entry-form"):
             yield Static(title, id="form-title")
             yield Static("", id="form-error")
             yield Label("Service")
@@ -127,6 +103,7 @@ class EntryFormScreen(ModalScreen[bool]):
             with Horizontal(id="password-row"):
                 yield Input(placeholder=password_placeholder, password=True, id="password")
                 yield Button("Show", id="toggle-password")
+                yield Button("Generate", id="generate-password")
             yield Label("Notes")
             yield Input(value=existing.get("notes", ""), placeholder="Notes", id="notes")
             with Horizontal(id="form-buttons"):
@@ -143,6 +120,17 @@ class EntryFormScreen(ModalScreen[bool]):
         password_input.password = not password_input.password
         self.query_one("#toggle-password", Button).label = (
             "Hide" if not password_input.password else "Show"
+        )
+
+    @on(Button.Pressed, "#generate-password")
+    def handle_generate_password(self) -> None:
+        # Same generator the CLI's `generate` command uses, with the same
+        # defaults -- not reimplemented here.
+        password_input = self.query_one("#password", Input)
+        password_input.password = False  # reveal it so the user can see what was generated
+        self.query_one("#toggle-password", Button).label = "Hide"
+        password_input.value = generator.generate_password(
+            generator.DEFAULT_LENGTH, use_symbols=True, exclude_ambiguous=False
         )
 
     @on(Button.Pressed, "#cancel")
@@ -189,29 +177,12 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
 
     BINDINGS = [("escape", "dismiss_no", "Cancel")]
 
-    DEFAULT_CSS = """
-    ConfirmDeleteScreen {
-        align: center middle;
-    }
-    #confirm-dialog {
-        width: 50;
-        height: auto;
-        border: thick $error;
-        padding: 1 2;
-        background: $surface;
-    }
-    #confirm-buttons {
-        height: 3;
-        align: right middle;
-    }
-    """
-
     def __init__(self, entry_name: str) -> None:
         super().__init__()
         self.entry_name = entry_name
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-dialog"):
+        with VerticalScroll(id="confirm-dialog"):
             yield Static(
                 f"Delete '{self.entry_name}'? This cannot be undone.", id="confirm-message"
             )
@@ -247,14 +218,15 @@ class MainScreen(Screen):
     # action_quit method, only App does, so the namespace prefix is required
     # to route there instead of silently failing to dispatch.
     #
-    # Single-letter bindings (a/c/d/q) only fire when the table has focus --
-    # the search Input consumes plain letters as text, so they can't reach
-    # the screen while the user is typing a query.
+    # Single-letter bindings (a/c/d/l/q) only fire when the table has focus
+    # -- the search Input consumes plain letters as text, so they can't
+    # reach the screen while the user is typing a query.
     BINDINGS = [
         ("q", "app.quit", "Quit"),
         ("a", "add_entry", "Add"),
         ("c", "copy_password", "Copy"),
         ("d", "delete_entry", "Delete"),
+        ("l", "lock_session", "Lock"),
         ("slash", "focus_search", "Search"),
         ("escape", "focus_table", "Back to list"),
     ]
@@ -282,7 +254,9 @@ class MainScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="Search by service or username...", id="search")
+        with Horizontal(id="toolbar"):
+            yield Input(placeholder="Search by service or username...", id="search")
+            yield Button("Lock", id="lock-button")
         yield VimDataTable(id="entries", cursor_type="row")
         yield Static("", id="status")
         yield Footer()
@@ -328,6 +302,13 @@ class MainScreen(Screen):
 
     def action_focus_table(self) -> None:
         self.query_one("#entries", VimDataTable).focus()
+
+    def action_lock_session(self) -> None:
+        self.app.lock_now()
+
+    @on(Button.Pressed, "#lock-button")
+    def handle_lock_button(self) -> None:
+        self.app.lock_now()
 
     def _current_row_key(self) -> str | None:
         """The entry name under the table cursor, or None if the table is
@@ -411,20 +392,38 @@ class MainScreen(Screen):
 
 
 class UnlockScreen(Screen):
-    """The first screen shown: prompts for the master password and unlocks
-    the vault via the shared `session` module, retrying on failure."""
+    """Prompts for the master password and unlocks the vault via the shared
+    `session` module, retrying on failure.
 
-    def __init__(self, vault_path: Path) -> None:
+    Used two ways:
+    - As the app's first screen when there's no cached session
+      (`on_unlock=None`): hands the new session to `app.enter_vault`, which
+      replaces this screen with `MainScreen`.
+    - As a re-lock overlay pushed on top of the vault view when the
+      inactivity timer fires (`on_unlock` given): hands the freshly
+      re-verified session back to the caller and pops itself, resuming
+      exactly where the user left off rather than losing their place.
+    """
+
+    def __init__(
+        self,
+        vault_path: Path,
+        *,
+        on_unlock: Callable[[bytes, dict, dict], None] | None = None,
+        locked_message: str = "",
+    ) -> None:
         super().__init__()
         self.vault_path = vault_path
+        self._on_unlock = on_unlock
+        self._locked_message = locked_message
 
     def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static("pass.sh", id="title"),
-            Static("", id="error"),
-            Input(placeholder="Master password", password=True, id="password"),
-            id="unlock-form",
-        )
+        with Vertical(id="unlock-form"):
+            yield Static("pass.sh", id="title")
+            if self._locked_message:
+                yield Static(self._locked_message, id="locked-message")
+            yield Static("", id="error")
+            yield Input(placeholder="Master password", password=True, id="password")
 
     def on_mount(self) -> None:
         self.query_one("#password", Input).focus()
@@ -445,34 +444,114 @@ class UnlockScreen(Screen):
             return
 
         error.update("")
-        self.app.switch_screen(
-            MainScreen(self.vault_path, key, kdf_params, entries)
-        )
+        if self._on_unlock is not None:
+            self._on_unlock(key, kdf_params, entries)
+        else:
+            self.app.enter_vault(key, kdf_params, entries)
 
 
 class PassShApp(App):
     """Textual TUI for pass.sh.
 
     Uses Textual's screen-stack (`push_screen`/`pop_screen`/`switch_screen`)
-    so later modal screens -- add/edit forms -- can be layered on top of
-    `MainScreen` without restructuring navigation.
+    so later modal screens -- add/edit forms, the re-lock overlay -- can be
+    layered on top of `MainScreen` without restructuring navigation.
     """
 
     TITLE = "pass.sh"
 
+    # Shared colors/borders/spacing for every screen -- resolved relative to
+    # this file's directory, so it's bundled as package data (see
+    # pyproject.toml) rather than looked up on disk at a fixed path.
+    CSS_PATH = "tui.tcss"
+
+    # Reuses the background agent's own inactivity threshold (the "existing
+    # auto-lock/inactivity timer") as the single source of truth, rather
+    # than the TUI inventing a second, independently-drifting timeout.
+    IDLE_TIMEOUT = agent.IDLE_TIMEOUT
+
+    # How often we poll for inactivity -- independent of IDLE_TIMEOUT itself,
+    # just the granularity of the check.
+    IDLE_CHECK_INTERVAL = 5.0
+
     def __init__(self, vault_path: Path | None = None) -> None:
         super().__init__()
         self.vault_path = vault_path or storage.default_vault_path()
+        self._main_screen: MainScreen | None = None
+        self._last_activity = time.monotonic()
+        self._relock_active = False
 
     def on_mount(self) -> None:
         # Skip the unlock prompt entirely if a session is already cached,
         # matching the CLI's behavior of never re-asking unnecessarily.
+        # Uses push_screen (not enter_vault/switch_screen) because Textual's
+        # switch_screen replaces the *previously pushed* screen -- there
+        # isn't one yet at this point, only the App's implicit initial
+        # screen, which switch_screen can't swap out.
         cached = session.try_cached_session(self.vault_path)
         if cached is not None:
             key, kdf_params, entries = cached
-            self.push_screen(MainScreen(self.vault_path, key, kdf_params, entries))
+            self._main_screen = MainScreen(self.vault_path, key, kdf_params, entries)
+            self._last_activity = time.monotonic()
+            self.push_screen(self._main_screen)
         else:
             self.push_screen(UnlockScreen(self.vault_path))
+        self.set_interval(self.IDLE_CHECK_INTERVAL, self._check_idle)
+
+    def enter_vault(self, key: bytes, kdf_params: dict, entries: dict) -> None:
+        """Used by UnlockScreen after a successful *initial* unlock (which
+        was itself pushed onto the stack) to replace it with MainScreen."""
+        self._main_screen = MainScreen(self.vault_path, key, kdf_params, entries)
+        self._last_activity = time.monotonic()
+        self.switch_screen(self._main_screen)
+
+    async def on_event(self, event: events.Event) -> None:
+        await super().on_event(event)
+        # Any keypress or click counts as activity -- resets the inactivity
+        # clock so an actively-working user is never locked out mid-task.
+        if isinstance(event, (events.Key, events.MouseDown)):
+            self._last_activity = time.monotonic()
+
+    def _check_idle(self) -> None:
+        if self._main_screen is None or self._relock_active:
+            return
+        if time.monotonic() - self._last_activity < self.IDLE_TIMEOUT:
+            return
+        self._enter_relock("Locked after inactivity. Re-enter your master password to continue.")
+
+    def lock_now(self) -> None:
+        """Immediately lock the vault, e.g. from MainScreen's Lock button or
+        its "l" binding -- the user-triggered counterpart to the idle-timer
+        relock above, sharing the same overlay and resume behavior."""
+        self._enter_relock("Locked. Re-enter your master password to continue.")
+
+    def _enter_relock(self, message: str) -> None:
+        if self._main_screen is None or self._relock_active:
+            return
+        self._relock_active = True
+        agent.lock(self.vault_path)  # keep the CLI's cached session in sync
+        self.push_screen(
+            UnlockScreen(
+                self.vault_path,
+                on_unlock=self._handle_relock,
+                locked_message=message,
+            )
+        )
+
+    def _handle_relock(self, key: bytes, kdf_params: dict, entries: dict) -> None:
+        screen = self._main_screen
+        if screen is not None:
+            # Mutate in place (not reassign) so any modal already open on
+            # top -- e.g. an in-progress edit form -- shares the same dict
+            # and sees the refreshed data too.
+            screen.key = key
+            screen.kdf_params = kdf_params
+            screen.entries.clear()
+            screen.entries.update(entries)
+            screen._refresh()
+        self._last_activity = time.monotonic()
+        self._relock_active = False
+        self.pop_screen()
 
 
 def run(vault_path: Path | None = None) -> None:

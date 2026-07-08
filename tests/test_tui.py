@@ -4,7 +4,7 @@ import pyperclip
 import pytest
 from textual.widgets import DataTable, Input, Static
 
-from passsh import agent, clipboard, storage
+from passsh import agent, clipboard, generator, storage
 from passsh.tui import (
     ConfirmDeleteScreen,
     EntryFormScreen,
@@ -828,3 +828,274 @@ async def test_escape_in_confirm_delete_keeps_entry(real_vault):
 
         assert isinstance(app.screen, MainScreen)
         assert "github" in entries
+
+
+# --- App: inactivity auto-lock ---
+
+
+async def test_app_locks_after_idle_timeout_and_shows_relock_overlay(vault_path, monkeypatch):
+    from passsh import session as session_module
+
+    monkeypatch.setattr(PassShApp, "IDLE_TIMEOUT", 0.2)
+    monkeypatch.setattr(PassShApp, "IDLE_CHECK_INTERVAL", 0.05)
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))  # populates the agent cache
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        assert isinstance(app.screen, MainScreen)
+
+        await pilot.pause(0.5)  # past IDLE_TIMEOUT plus several checks
+
+        assert isinstance(app.screen, UnlockScreen)
+        message = str(app.screen.query_one("#locked-message", Static).render())
+        assert "inactivity" in message.lower()
+
+
+async def test_relock_locks_agent_session_too(vault_path, monkeypatch):
+    from passsh import session as session_module
+
+    monkeypatch.setattr(PassShApp, "IDLE_TIMEOUT", 0.2)
+    monkeypatch.setattr(PassShApp, "IDLE_CHECK_INTERVAL", 0.05)
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert isinstance(app.screen, UnlockScreen)
+
+        # The relock is wired into the *same* agent lock the CLI relies on
+        # for its own cached session, not a TUI-only illusion of locking.
+        assert agent.get_cached_key(vault_path) is None
+
+
+async def test_activity_prevents_premature_relock(vault_path, monkeypatch):
+    from passsh import session as session_module
+
+    monkeypatch.setattr(PassShApp, "IDLE_TIMEOUT", 0.3)
+    monkeypatch.setattr(PassShApp, "IDLE_CHECK_INTERVAL", 0.05)
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        assert isinstance(app.screen, MainScreen)
+
+        # "Use" the app for longer than IDLE_TIMEOUT overall, but with gaps
+        # between keystrokes shorter than IDLE_TIMEOUT -- it should never
+        # be considered idle.
+        for _ in range(6):
+            await pilot.press("j")
+            await pilot.pause(0.15)
+
+        assert isinstance(app.screen, MainScreen)
+
+
+async def test_relock_wrong_password_shows_error_and_allows_retry(vault_path, monkeypatch):
+    from passsh import session as session_module
+
+    monkeypatch.setattr(PassShApp, "IDLE_TIMEOUT", 0.2)
+    monkeypatch.setattr(PassShApp, "IDLE_CHECK_INTERVAL", 0.05)
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert isinstance(app.screen, UnlockScreen)
+
+        password_input = app.screen.query_one("#password", Input)
+        password_input.value = "wrong password"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, UnlockScreen)  # still locked, not exited
+        error = app.screen.query_one("#error", Static)
+        assert str(error.render()) != ""
+
+
+async def test_relock_with_correct_password_resumes_main_screen(vault_path, monkeypatch):
+    from passsh import session as session_module
+
+    monkeypatch.setattr(PassShApp, "IDLE_TIMEOUT", 0.2)
+    monkeypatch.setattr(PassShApp, "IDLE_CHECK_INTERVAL", 0.05)
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert isinstance(app.screen, UnlockScreen)
+
+        password_input = app.screen.query_one("#password", Input)
+        password_input.value = MASTER_PW
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, MainScreen)
+
+
+async def test_relock_refreshes_entries_changed_on_disk_while_locked(vault_path, monkeypatch):
+    from passsh import session as session_module
+
+    monkeypatch.setattr(PassShApp, "IDLE_TIMEOUT", 0.2)
+    monkeypatch.setattr(PassShApp, "IDLE_CHECK_INTERVAL", 0.05)
+
+    key, kdf_params, _entries = session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        await pilot.pause(0.5)
+        assert isinstance(app.screen, UnlockScreen)
+
+        # Simulate the vault changing elsewhere (e.g. via the CLI) during
+        # the window the TUI was locked.
+        storage.save_vault(
+            vault_path,
+            key,
+            kdf_params,
+            {
+                "newsite": {
+                    "username": "eve",
+                    "password": "x",
+                    "notes": "",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                }
+            },
+        )
+
+        password_input = app.screen.query_one("#password", Input)
+        password_input.value = MASTER_PW
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, MainScreen)
+        table = app.screen.query_one("#entries", DataTable)
+        assert table.row_count == 1
+        assert table.get_row_at(0)[0] == "newsite"
+
+
+# --- EntryFormScreen: password generation ---
+
+
+async def test_generate_button_fills_password_field(real_vault):
+    vault_path, key, kdf_params = real_vault
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        app.push_screen(EntryFormScreen(vault_path, key, kdf_params, {}))
+        await pilot.pause()
+
+        password_input = app.screen.query_one("#password", Input)
+        assert password_input.value == ""
+
+        await pilot.click("#generate-password")
+        await pilot.pause()
+
+        assert len(password_input.value) == generator.DEFAULT_LENGTH
+        # Generated passwords are revealed, not left masked -- the user
+        # should be able to see what was just generated.
+        assert password_input.password is False
+
+
+async def test_generated_password_is_saved_on_add(real_vault):
+    vault_path, key, kdf_params = real_vault
+    entries = {}
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        app.push_screen(EntryFormScreen(vault_path, key, kdf_params, entries))
+        await pilot.pause()
+
+        app.screen.query_one("#service", Input).value = "generated-site"
+        await pilot.click("#generate-password")
+        await pilot.pause()
+        generated = app.screen.query_one("#password", Input).value
+
+        await pilot.click("#save")
+        await pilot.pause()
+
+        assert entries["generated-site"]["password"] == generated
+        _key2, _kdf2, reloaded = storage.load_vault(vault_path, MASTER_PW.encode("utf-8"))
+        assert reloaded["generated-site"]["password"] == generated
+
+
+async def test_generate_button_available_in_edit_mode_and_overrides_password(real_vault):
+    vault_path, key, kdf_params = real_vault
+    entries = copy.deepcopy(SAMPLE_ENTRIES)
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        app.push_screen(
+            EntryFormScreen(vault_path, key, kdf_params, entries, entry_name="github")
+        )
+        await pilot.pause()
+
+        await pilot.click("#generate-password")
+        await pilot.pause()
+        generated = app.screen.query_one("#password", Input).value
+        assert len(generated) == generator.DEFAULT_LENGTH
+        assert generated != "hunter2"  # not the pre-existing password
+
+        await pilot.click("#save")
+        await pilot.pause()
+
+        assert entries["github"]["password"] == generated
+
+
+# --- MainScreen: Lock button/binding ---
+
+
+async def test_lock_button_triggers_relock_overlay(vault_path):
+    from passsh import session as session_module
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))  # populates the agent cache
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        assert isinstance(app.screen, MainScreen)
+
+        await pilot.click("#lock-button")
+        await pilot.pause()
+
+        assert isinstance(app.screen, UnlockScreen)
+        message = str(app.screen.query_one("#locked-message", Static).render())
+        assert "locked" in message.lower()
+        # A manual lock, not the inactivity one.
+        assert "inactivity" not in message.lower()
+
+        # And the CLI's own cached session is gone too, same as the
+        # inactivity-triggered relock.
+        assert agent.get_cached_key(vault_path) is None
+
+
+async def test_l_key_locks_session(vault_path):
+    from passsh import session as session_module
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        assert isinstance(app.screen, MainScreen)
+
+        await pilot.press("l")
+        await pilot.pause()
+
+        assert isinstance(app.screen, UnlockScreen)
+
+
+async def test_lock_button_then_correct_password_resumes_main_screen(vault_path):
+    from passsh import session as session_module
+
+    session_module.unlock(vault_path, MASTER_PW.encode("utf-8"))
+
+    app = PassShApp(vault_path)
+    async with app.run_test() as pilot:
+        await pilot.click("#lock-button")
+        await pilot.pause()
+        assert isinstance(app.screen, UnlockScreen)
+
+        password_input = app.screen.query_one("#password", Input)
+        password_input.value = MASTER_PW
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, MainScreen)

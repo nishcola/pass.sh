@@ -25,5 +25,8 @@ pm = "passsh.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+passsh = ["*.tcss"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

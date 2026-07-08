@@ -1,0 +1,141 @@
+/* Shared theme for every pass.sh TUI screen: colors, borders, and spacing
+   live here so screens look consistent. Individual screens should not
+   define their own DEFAULT_CSS -- add rules here instead, scoped by the
+   screen's class name or the widget's #id. */
+
+Screen {
+    background: $surface;
+}
+
+/* ---------- Unlock / re-lock screen ---------- */
+
+UnlockScreen {
+    align: center middle;
+}
+
+#unlock-form {
+    width: 50;
+    max-width: 92%;
+    height: auto;
+    border: thick $primary;
+    padding: 1 2;
+    background: $panel;
+}
+
+#unlock-form #title {
+    text-style: bold;
+    color: $primary;
+    width: 100%;
+    content-align: center middle;
+    padding-bottom: 1;
+}
+
+#unlock-form #locked-message {
+    color: $warning;
+    padding-bottom: 1;
+}
+
+#unlock-form #error {
+    color: $error;
+    min-height: 1;
+}
+
+/* ---------- Main vault screen ---------- */
+
+MainScreen #toolbar {
+    height: 3;
+}
+
+MainScreen #search {
+    width: 1fr;
+    margin: 0 1;
+    border: round $primary 40%;
+}
+
+MainScreen #search:focus {
+    border: round $primary;
+}
+
+MainScreen #lock-button {
+    margin: 0 1 0 0;
+}
+
+MainScreen #entries {
+    margin: 0 1;
+}
+
+MainScreen #status {
+    height: 1;
+    min-height: 1;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+/* ---------- Add/edit entry modal ---------- */
+
+EntryFormScreen {
+    align: center middle;
+}
+
+#entry-form {
+    width: 60;
+    max-width: 92%;
+    height: auto;
+    max-height: 100%;
+    border: thick $primary;
+    padding: 1 2;
+    background: $panel;
+}
+
+#entry-form #form-title {
+    text-style: bold;
+    color: $primary;
+    padding-bottom: 1;
+}
+
+#entry-form #form-error {
+    color: $error;
+    min-height: 1;
+}
+
+#entry-form Label {
+    color: $text-muted;
+}
+
+#password-row {
+    height: 3;
+}
+
+#password-row Input {
+    width: 1fr;
+}
+
+#form-buttons {
+    height: 3;
+    align: right middle;
+}
+
+/* ---------- Delete confirmation modal ---------- */
+
+ConfirmDeleteScreen {
+    align: center middle;
+}
+
+#confirm-dialog {
+    width: 50;
+    max-width: 92%;
+    height: auto;
+    max-height: 100%;
+    border: thick $error;
+    padding: 1 2;
+    background: $panel;
+}
+
+#confirm-message {
+    padding-bottom: 1;
+}
+
+#confirm-buttons {
+    height: 3;
+    align: right middle;
+}
