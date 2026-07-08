@@ -99,6 +99,12 @@ cached session; see [Session auto-lock](#session-auto-lock) below).
 All commands below assume the default vault (`~/.passsh/vault.json`); add
 `--vault PATH` to target a different one.
 
+### Access GUI version
+
+```sh
+$ pm tui
+```
+
 ### Add an entry
 
 ```sh
@@ -173,7 +179,7 @@ $ pm generate
 Generated password copied to clipboard (clears in 15s).
 
 $ pm generate --no-copy --length 32
-K9f#pQ2!zXvR7m@Lc4WsYtB1Nh8Jd0Ea
+#K9fpQ2!zXvR7m@Lc4WsYtB1Nh8Jd0Ea
 ```
 
 - `--length N` — password length (default: 20).
@@ -223,30 +229,3 @@ Failed master-password attempts are tracked (as a small non-secret counter,
 never the password itself) and trigger exponential backoff — 1s, 2s, 4s...
 capped at 60s — before another attempt is accepted, even if that next
 attempt uses the correct password. A successful unlock resets the counter.
-
-## Running the tests
-
-```sh
-pip install -e ".[dev]"
-pytest
-```
-
-The test suite covers encryption round-trips and tamper detection at the
-crypto/storage layer, session/rate-limit behavior, clipboard auto-clear
-(without touching your real clipboard in most cases), and full CLI command
-behavior end-to-end, including tampered-vault detection through the CLI
-itself.
-
-## Known limitations
-
-- The derived key is held in the agent's RAM and served over local IPC to
-  other processes running as your user — this protects against other user
-  accounts on the machine, not against another process running as you.
-- Python doesn't guarantee zeroing memory or preventing swap; a sufficiently
-  privileged attacker with access to a memory dump or swap file could in
-  theory recover secrets that were in memory.
-- Rate limiting protects the `pm` unlock path specifically, not the vault
-  file itself — someone who copies the vault file elsewhere can still
-  brute-force it offline (Argon2id's cost is the actual defense there).
-- There's no tamper-evident version/rollback protection: restoring an older,
-  still-validly-encrypted copy of the vault file isn't detected.
